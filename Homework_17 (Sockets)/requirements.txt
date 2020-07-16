@@ -1,5 +1,2 @@
-<<<<<<< HEAD
 keyboard
-=======
->>>>>>> 4851d4dcb28b30f15c91fe512a44d6b0acb31dbe
 pyWinhook
