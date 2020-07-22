@@ -3,15 +3,21 @@ import io
 import os
 import re
 import time
+import urllib.error
 import urllib.request
+from collections import namedtuple
+from functools import partial
 from multiprocessing.pool import ThreadPool
 from threading import Lock
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 
 def valid_size(size):
-    return tuple(map(int, re.fullmatch(r'(\d*)x(\d*)', size).group(1, 2)))
+    try:
+        return tuple(map(int, re.fullmatch(r'(\d*)x(\d*)', size).group(1, 2)))
+    except AttributeError:
+        raise argparse.ArgumentTypeError('Invalid size')
 
 
 def valid_urllist(urllist):
@@ -20,80 +26,94 @@ def valid_urllist(urllist):
     raise argparse.ArgumentTypeError(f'File {urllist} does not exist')
 
 
-parser = argparse.ArgumentParser(description='download and process images in multiple threads')
-
-parser.add_argument('urllist', nargs='?', default='.', type=valid_urllist, help='path to file with urls')
-parser.add_argument('--dir', default='.', nargs='?', help='specify destination directory')
-parser.add_argument('--threads', default='1', nargs='?', type=int, help='specify number of threads')
-parser.add_argument('--size', default='100x100', nargs='?', type=valid_size, help='define maximum image size')
-
-args = parser.parse_args()
-
-counter = 0
-error_counter = 0
-bytes_downloaded = 0
-lock = Lock()
-
-user_agent = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.7) Gecko/2009021910 Firefox/3.0.7'
-headers = {'User-Agent':user_agent,}
-
-
-def download_image(num_url):
-    num, url = num_url
-
+def valid_dir(d):
     try:
-        request = urllib.request.Request(url, None, headers)
+        if not os.path.exists(d):
+            os.makedirs(d)
+        return d
+    except NotADirectoryError:
+        raise argparse.ArgumentTypeError(f"Invalid dir '{d}'")
+
+
+def download_image(args, headers, lock, line):
+    try:
+        request = urllib.request.Request(line.url, headers=headers)
         data = urllib.request.urlopen(request)
         meta = int(data.headers['Content-Length'])
         data = data.read()
 
-    except:
-        print(f'Error: Invalid url, line {num}',)
+    except (urllib.error.HTTPError, urllib.error.URLError, TypeError):
+        print(f'Error: Invalid url, line {line.num}',)
         with lock:
             global error_counter
             error_counter += 1
         return
 
-    process_image(num, meta, data)
+    process_image(line, meta, data, lock, args)
 
 
-def process_image(num, meta, data):
-    filename = f'{num:05}.jpeg'
-
+def process_image(line, meta, data, lock, args):
     try:
         img = Image.open(io.BytesIO(data))
         img.thumbnail(args.size)
         img = img.convert("RGB")
 
-        if not os.path.exists(args.dir):
-            os.makedirs(args.dir)
-
-        img.save(os.path.join(args.dir, filename))
-        print(f'Image saved: {filename}')
-        with lock:
-            global bytes_downloaded
-            global counter
-            bytes_downloaded += meta
-            counter += 1
-
-    except:
-        print(f'Error: Invalid image, line {num}')
+    except UnidentifiedImageError:
+        print(f'Error: Invalid image, line {line.num}')
         with lock:
             global error_counter
             error_counter += 1
+        return
 
-with open(args.urllist, 'r') as fnm:
-    lines = enumerate(fnm.readlines())
+    filename = f'{line.num:05}.jpeg'
+    img.save(os.path.join(args.dir, filename))
+    print(f'Image saved: {filename}')
+    with lock:
+        global bytes_downloaded
+        global counter
+        bytes_downloaded += meta
+        counter += 1
 
-start_time = time.time()
-pool = ThreadPool(args.threads)
-results = pool.map(download_image, lines)
-pool.close()
-pool.join()
-stop_time = time.time() - start_time
 
-print('----')
-print(f'Images Saved: {counter}')
-print(f'Bytes Downloaded: {bytes_downloaded}')
-print(f'Saving Images Failed: {error_counter}')
-print(f'Time spent: {round(stop_time, 2)} sec')
+def setup_parser():
+    parser = argparse.ArgumentParser(description='download and process images in multiple threads')
+
+    parser.add_argument('urllist', nargs='?', default='.', type=valid_urllist, help='path to file with urls')
+    parser.add_argument('--dir', default='.', nargs='?', type=valid_dir, help='specify destination directory')
+    parser.add_argument('--threads', default='1', nargs='?', type=int, help='specify number of threads')
+    parser.add_argument('--size', default='100x100', nargs='?', type=valid_size, help='define maximum image size')
+
+    return parser.parse_args()
+
+
+def main():
+    args = setup_parser()
+    user_agent = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.7) Gecko/2009021910 Firefox/3.0.7'
+    headers = {'User-Agent': user_agent, }
+    Lines = namedtuple('Lines', ['num', 'url'])
+
+    with open(args.urllist, 'r') as fnm:
+        lines = (Lines(num, url) for num, url in enumerate(fnm.readlines(), 1))
+
+    lock = Lock()
+    func = partial(download_image, args, headers, lock)
+    start_time = time.time()
+    pool = ThreadPool(args.threads)
+    pool.map(func, lines)
+    pool.close()
+    pool.join()
+    stop_time = time.time() - start_time
+
+    print('----')
+    print(f'Images Saved: {counter}')
+    print(f'Bytes Downloaded: {bytes_downloaded}')
+    print(f'Saving Images Failed: {error_counter}')
+    print(f'Time spent: {round(stop_time, 2)} sec')
+
+
+counter = 0
+error_counter = 0
+bytes_downloaded = 0
+
+if __name__ == '__main__':
+    main()
