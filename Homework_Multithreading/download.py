@@ -35,24 +35,23 @@ def valid_dir(d):
         raise argparse.ArgumentTypeError(f"Invalid dir '{d}'")
 
 
-def download_image(args, headers, lock, line):
+def download_image(args, headers, lock, counters, line):
     try:
         request = urllib.request.Request(line.url, headers=headers)
         data = urllib.request.urlopen(request)
         meta = int(data.headers['Content-Length'])
         data = data.read()
 
-    except (urllib.error.HTTPError, urllib.error.URLError, TypeError):
+    except (urllib.error.HTTPError, urllib.error.URLError, TypeError, ConnectionResetError):
         print(f'Error: Invalid url, line {line.num}',)
         with lock:
-            global error_counter
-            error_counter += 1
+            counters.error_counter += 1
         return
 
-    process_image(line, meta, data, lock, args)
+    process_image(line, meta, data, lock, counters, args)
 
 
-def process_image(line, meta, data, lock, args):
+def process_image(line, meta, data, lock, counters, args):
     try:
         img = Image.open(io.BytesIO(data))
         img.thumbnail(args.size)
@@ -61,18 +60,15 @@ def process_image(line, meta, data, lock, args):
     except UnidentifiedImageError:
         print(f'Error: Invalid image, line {line.num}')
         with lock:
-            global error_counter
-            error_counter += 1
+            counters.error_counter += 1
         return
 
     filename = f'{line.num:05}.jpeg'
     img.save(os.path.join(args.dir, filename))
     print(f'Image saved: {filename}')
     with lock:
-        global bytes_downloaded
-        global counter
-        bytes_downloaded += meta
-        counter += 1
+        counters.bytes_downloaded += meta
+        counters.counter += 1
 
 
 def setup_parser():
@@ -88,6 +84,7 @@ def setup_parser():
 
 def main():
     args = setup_parser()
+    counters = Counters()
     user_agent = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-US; rv:1.9.0.7) Gecko/2009021910 Firefox/3.0.7'
     headers = {'User-Agent': user_agent, }
     Lines = namedtuple('Lines', ['num', 'url'])
@@ -96,7 +93,7 @@ def main():
         lines = (Lines(num, url) for num, url in enumerate(fnm.readlines(), 1))
 
     lock = Lock()
-    func = partial(download_image, args, headers, lock)
+    func = partial(download_image, args, headers, lock, counters)
     start_time = time.time()
     pool = ThreadPool(args.threads)
     pool.map(func, lines)
@@ -105,15 +102,16 @@ def main():
     stop_time = time.time() - start_time
 
     print('----')
-    print(f'Images Saved: {counter}')
-    print(f'Bytes Downloaded: {bytes_downloaded}')
-    print(f'Saving Images Failed: {error_counter}')
+    print(f'Images Saved: {counters.counter}')
+    print(f'Bytes Downloaded: {counters.bytes_downloaded}')
+    print(f'Saving Images Failed: {counters.error_counter}')
     print(f'Time spent: {round(stop_time, 2)} sec')
 
 
-counter = 0
-error_counter = 0
-bytes_downloaded = 0
+class Counters:
+    counter = 0
+    error_counter = 0
+    bytes_downloaded = 0
 
 if __name__ == '__main__':
     main()
